@@ -4,7 +4,7 @@ An interactive AI photo-culling demo for portraits and landscapes, with a config
 
 > 自动识别人像与风景照片中的虚焦、运动拖影、相机抖动、过曝与欠曝，再将达标照片转化为可检索的视觉资产。
 
-[Live Demo](https://lumisort-vincent-photo-ai.haoy6092.chatgpt.site)
+[Live Demo](https://lumisort-ai-portrait-culling.haoy6092.chatgpt.site)
 
 ![LumiSort social preview](./public/og.png)
 
