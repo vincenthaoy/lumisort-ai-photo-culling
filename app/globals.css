@@ -1,0 +1,48 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-destructive: var(--destructive);
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1.25rem;
+}
+
+:root {
+  --background: oklch(0.15 0.005 165);
+  --foreground: oklch(0.95 0.018 88);
+  --primary: oklch(0.92 0.2 119);
+  --primary-foreground: oklch(0.16 0.01 120);
+  --secondary: oklch(0.23 0.008 165);
+  --secondary-foreground: oklch(0.92 0.01 88);
+  --muted: oklch(0.22 0.005 165);
+  --muted-foreground: oklch(0.67 0.01 88);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.92 0.2 119);
+  --destructive: oklch(0.67 0.2 25);
+}
+
+@layer base {
+  * { @apply border-border outline-ring/50; }
+  html { @apply bg-background font-sans; }
+  body { @apply bg-background text-foreground; }
+  button, a { -webkit-tap-highlight-color: transparent; }
+}
+
+::selection { background: #d7ff61; color: #101111; }
