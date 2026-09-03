@@ -7,12 +7,27 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
+import {
+  cloudbaseConfigured,
+  loadCloudPhotos,
+  removeCloudPhoto,
+  restoreCloudUser,
+  saveCloudPhoto,
+  signInCloud,
+  signOutCloud,
+  signUpCloud,
+  updateCloudPhoto,
+  uploadPhotoFile,
+  verifyCloudSignUp,
+  type CloudPhotoDocument,
+  type CloudUser,
+} from '@/lib/cloudbase-client';
 
 type Photo = {
   id: string; src: string; title: string; filename: string; score: number; composition: number;
   color: number; clarity: number; tags: string[]; entities: string[]; mood: string; location: string;
   date: string; camera: string; colors: string[]; exposure?: number; faceQuality?: number; issues?: string[];
-  favorite?: boolean; pending?: boolean; imported?: boolean;
+  favorite?: boolean; pending?: boolean; imported?: boolean; cloudId?: string; cloudFileId?: string; cloudPath?: string; ownerId?: string;
 };
 
 const qualityDimensions = [
@@ -34,7 +49,7 @@ const qualityDimensions = [
 ] as const;
 type DimensionId = typeof qualityDimensions[number]['id'];
 type UiLanguage = 'zh-CN' | 'en' | 'zh-TW';
-type DemoUser = { name: string; email: string };
+type AppUser = CloudUser | { id: string; name: string; email: string; mode: 'demo' };
 const defaultDimensions = qualityDimensions.filter((item) => item.defaultOn).map((item) => item.id);
 const dimensionPresets: Record<string, DimensionId[]> = {
   '快速技术': ['focus', 'motion', 'sharpness', 'exposure', 'highlights', 'composition'],
@@ -99,6 +114,29 @@ function readFile(file: File): Promise<string> {
   return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = reject; reader.readAsDataURL(file); });
 }
 
+function toCloudDocument(photo: Photo, userId: string, fileId: string, cloudPath: string): CloudPhotoDocument {
+  const now = Date.now();
+  return {
+    userId, fileId, cloudPath, title: photo.title, filename: photo.filename, score: photo.score,
+    composition: photo.composition, color: photo.color, clarity: photo.clarity, exposure: photo.exposure || 0,
+    faceQuality: photo.faceQuality || 0, tags: photo.tags, entities: photo.entities, mood: photo.mood,
+    location: photo.location, date: photo.date, camera: photo.camera, colors: photo.colors, issues: photo.issues || [],
+    favorite: Boolean(photo.favorite), pending: Boolean(photo.pending), imported: true, createdAt: now, updatedAt: now,
+  };
+}
+
+function fromCloudDocument(document: CloudPhotoDocument, url: string): Photo {
+  return {
+    id: document._id || `cloud-${document.fileId}`, cloudId: document._id, cloudFileId: document.fileId,
+    cloudPath: document.cloudPath, ownerId: document.userId, src: url, title: document.title, filename: document.filename,
+    score: document.score, composition: document.composition, color: document.color, clarity: document.clarity,
+    exposure: document.exposure, faceQuality: document.faceQuality, tags: document.tags || [], entities: document.entities || [],
+    mood: document.mood, location: document.location, date: document.date, camera: document.camera,
+    colors: document.colors || ['#777777', '#4d4d4d', '#292929'], issues: document.issues || [],
+    favorite: document.favorite, pending: document.pending, imported: true,
+  };
+}
+
 export function PhotoWorkspace() {
   const [photos, setPhotos] = useState(seedPhotos);
   const [activeNav, setActiveNav] = useState<'all' | 'picks' | 'rejects' | 'pending' | 'favorites'>('picks');
@@ -107,11 +145,13 @@ export function PhotoWorkspace() {
   const [progress, setProgress] = useState(0); const [dragging, setDragging] = useState(false);
   const [showFilters, setShowFilters] = useState(false); const [showHelp, setShowHelp] = useState(false); const [showDimensions, setShowDimensions] = useState(false); const [notice, setNotice] = useState('');
   const [selectedDimensions, setSelectedDimensions] = useState<DimensionId[]>(defaultDimensions);
-  const [showAccount, setShowAccount] = useState(false); const [demoUser, setDemoUser] = useState<DemoUser | null>(null);
+  const [showAccount, setShowAccount] = useState(false); const [user, setUser] = useState<AppUser | null>(null);
+  const [cloudLoading, setCloudLoading] = useState(cloudbaseConfigured);
   const [language, setLanguage] = useState<UiLanguage>('zh-CN'); const [fontScale, setFontScale] = useState(100);
   const [apiConfigured, setApiConfigured] = useState(false);
   const [deleted, setDeleted] = useState<{ photo: Photo; index: number } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const deleteTimerRef = useRef<number | null>(null);
   const copy = uiCopy[language];
 
   useEffect(() => {
@@ -121,7 +161,29 @@ export function PhotoWorkspace() {
     document.documentElement.lang = language; document.documentElement.style.fontSize = `${fontScale}%`;
     try { localStorage.setItem('lumisort-preferences', JSON.stringify({ language, fontScale })); } catch { /* Preferences remain available for this session. */ }
   }, [language, fontScale]);
-  useEffect(() => { fetch('/api/analyze').then((response) => response.json()).then((value) => setApiConfigured(Boolean(value.configured))).catch(() => setApiConfigured(false)); }, []);
+  useEffect(() => { fetch('/api/analyze').then((response) => response.json()).then((value: unknown) => setApiConfigured(Boolean((value as { configured?: boolean }).configured))).catch(() => setApiConfigured(false)); }, []);
+  useEffect(() => {
+    if (!cloudbaseConfigured) return;
+    restoreCloudUser().then(async (restored) => {
+      if (!restored) return;
+      setUser(restored);
+      const items = await loadCloudPhotos(restored.id);
+      setPhotos(items.map(({ document, url }) => fromCloudDocument(document, url)));
+      setActiveNav('all');
+    }).catch(() => setNotice('腾讯云登录状态读取失败，已保留演示模式')).finally(() => setCloudLoading(false));
+  }, []);
+
+  async function enterCloudLibrary(account: CloudUser) {
+    setCloudLoading(true); setUser(account);
+    try {
+      const items = await loadCloudPhotos(account.id);
+      setPhotos(items.map(({ document, url }) => fromCloudDocument(document, url)));
+      setActiveNav('all'); setShowAccount(false);
+      setNotice(`已进入 ${account.name} 的腾讯云照片库`);
+    } finally {
+      setCloudLoading(false); window.setTimeout(() => setNotice(''), 3200);
+    }
+  }
 
   const scoredPhotos = useMemo(() => photos.map((photo) => ({ ...photo, score: calculatedScore(photo, selectedDimensions) })), [photos, selectedDimensions]);
   const filtered = useMemo(() => {
@@ -152,52 +214,87 @@ export function PhotoWorkspace() {
       date: new Date().toLocaleDateString('zh-CN').replaceAll('/', '.'), camera: '待读取 EXIF', colors: ['#777777', '#4d4d4d', '#292929'], pending: true, imported: true,
     })));
     setPhotos((current) => [...created, ...current]); setActiveNav('pending');
-    setNotice(`已导入 ${created.length} 张照片，可开始 AI 分析`); window.setTimeout(() => setNotice(''), 3200);
+    if (user?.mode === 'cloud') {
+      setNotice(`正在把 ${created.length} 张照片安全上传到腾讯云…`);
+      const persisted = await Promise.allSettled(files.map(async (file, index) => {
+        const uploaded = await uploadPhotoFile(file, user.id);
+        const document = toCloudDocument(created[index], user.id, uploaded.fileId, uploaded.cloudPath);
+        const cloudId = await saveCloudPhoto(document);
+        return { localId: created[index].id, cloudId, cloudFileId: uploaded.fileId, cloudPath: uploaded.cloudPath, ownerId: user.id };
+      }));
+      const successful = persisted.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+      setPhotos((current) => current.map((photo) => successful.find((item) => item.localId === photo.id) ? { ...photo, ...successful.find((item) => item.localId === photo.id) } : photo));
+      const failed = persisted.length - successful.length;
+      setNotice(failed ? `${successful.length} 张已存入云端，${failed} 张暂留本地` : `${successful.length} 张已存入你的腾讯云照片库`);
+    } else {
+      setNotice(`已导入 ${created.length} 张照片，可开始 AI 分析（刷新后不保留）`);
+    }
+    window.setTimeout(() => setNotice(''), 3600);
   }
 
   async function analyzePending() {
     const pending = photos.filter((p) => p.pending);
     if (!pending.length) { setNotice('当前没有待处理照片，先导入几张试试'); window.setTimeout(() => setNotice(''), 3000); return; }
-    setAnalyzing(true); setProgress(6); const timer = window.setInterval(() => setProgress((value) => Math.min(value + 7, 90)), 180);
-    let result: Partial<Photo> = {};
-    try { const response = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageDataUrl: pending[0].src, dimensions: selectedDimensions }) }); if (response.ok) result = (await response.json()).analysis ?? {}; } catch { /* Offline demo fallback. */ }
-    window.clearInterval(timer); setProgress(100); const moods = ['治愈', '通透', '故事感', '宁静'];
-    setPhotos((current) => current.map((photo, index) => photo.pending ? { ...photo,
-      score: index === 0 && result.score ? Number(result.score) : index % 4 === 3 ? 4.8 : 8.3 + (index % 4) * 0.2,
-      composition: index === 0 && result.composition ? Number(result.composition) : 8.2,
-      color: index === 0 && result.color ? Number(result.color) : 8.5, clarity: index === 0 && result.clarity ? Number(result.clarity) : index % 4 === 3 ? 3.6 : 8.7,
-      exposure: index === 0 && result.exposure ? Number(result.exposure) : index % 4 === 3 ? 5.2 : 8.6,
-      faceQuality: index === 0 && result.faceQuality ? Number(result.faceQuality) : index % 4 === 3 ? 4.4 : 8.8,
-      issues: index === 0 && Array.isArray(result.issues) ? result.issues : index % 4 === 3 ? ['人像模糊', '焦点偏移'] : [],
-      tags: index === 0 && Array.isArray(result.tags) ? result.tags : ['旅行摄影', '自然光', '纪实'],
-      entities: index === 0 && Array.isArray(result.entities) ? result.entities : ['主体', '环境'],
-      mood: index === 0 && result.mood ? String(result.mood) : moods[index % moods.length], pending: false,
-    } : photo));
+    setAnalyzing(true); setProgress(2);
+    for (let index = 0; index < pending.length; index += 1) {
+      const photo = pending[index]; let result: Partial<Photo> = {};
+      try {
+        const response = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageUrl: photo.src, dimensions: selectedDimensions }) });
+        if (response.ok) result = ((await response.json()) as { analysis?: Partial<Photo> }).analysis ?? {};
+      } catch { /* The API route returns a deterministic demo fallback when the model is unavailable. */ }
+      const analyzed: Photo = {
+        ...photo, score: Number(result.score) || 0, composition: Number(result.composition) || 0,
+        color: Number(result.color) || 0, clarity: Number(result.clarity) || 0, exposure: Number(result.exposure) || 0,
+        faceQuality: Number(result.faceQuality) || 0, issues: Array.isArray(result.issues) ? result.issues : [],
+        tags: Array.isArray(result.tags) ? result.tags : ['旅行摄影', '待复核'], entities: Array.isArray(result.entities) ? result.entities : ['主体', '环境'],
+        mood: result.mood ? String(result.mood) : '待复核', pending: false,
+      };
+      setPhotos((current) => current.map((item) => item.id === photo.id ? analyzed : item));
+      setProgress(Math.round(((index + 1) / pending.length) * 100));
+      if (analyzed.cloudId) {
+        await updateCloudPhoto(analyzed.cloudId, {
+          score: analyzed.score, composition: analyzed.composition, color: analyzed.color, clarity: analyzed.clarity,
+          exposure: analyzed.exposure || 0, faceQuality: analyzed.faceQuality || 0, issues: analyzed.issues || [],
+          tags: analyzed.tags, entities: analyzed.entities, mood: analyzed.mood, pending: false,
+        }).catch(() => setNotice('AI 已分析完成，但有一条云端记录尚未同步'));
+      }
+    }
     window.setTimeout(() => { setAnalyzing(false); setActiveNav('picks'); setNotice(`AI 已完成 ${pending.length} 张照片的评分与标签`); window.setTimeout(() => setNotice(''), 3200); }, 450);
   }
 
-  function toggleFavorite(id: string) { setPhotos((current) => current.map((photo) => photo.id === id ? { ...photo, favorite: !photo.favorite } : photo)); setSelected((current) => current?.id === id ? { ...current, favorite: !current.favorite } : current); }
+  function toggleFavorite(id: string) {
+    const photo = photos.find((item) => item.id === id); const favorite = !photo?.favorite;
+    setPhotos((current) => current.map((item) => item.id === id ? { ...item, favorite } : item));
+    setSelected((current) => current?.id === id ? { ...current, favorite } : current);
+    if (photo?.cloudId) updateCloudPhoto(photo.cloudId, { favorite }).catch(() => setNotice('收藏状态暂未同步到云端'));
+  }
   function deletePhoto(id: string) {
     setPhotos((current) => {
       const index = current.findIndex((photo) => photo.id === id); if (index < 0) return current;
       const photo = current[index]; setDeleted({ photo, index });
-      window.setTimeout(() => setDeleted((value) => value?.photo.id === id ? null : value), 6000);
+      if (deleteTimerRef.current) window.clearTimeout(deleteTimerRef.current);
+      deleteTimerRef.current = window.setTimeout(() => {
+        if (photo.cloudId) removeCloudPhoto(photo.cloudId, photo.cloudFileId).catch(() => setNotice('云端删除失败，请稍后重试'));
+        setDeleted((value) => value?.photo.id === id ? null : value);
+      }, 6000);
       return current.filter((item) => item.id !== id);
     });
     setSelected(null);
   }
   function undoDelete() {
     if (!deleted) return;
+    if (deleteTimerRef.current) window.clearTimeout(deleteTimerRef.current);
+    deleteTimerRef.current = null;
     setPhotos((current) => { const restored = [...current]; restored.splice(Math.min(deleted.index, restored.length), 0, deleted.photo); return restored; });
     setDeleted(null); setNotice('照片已恢复'); window.setTimeout(() => setNotice(''), 2600);
   }
-  function exportJson() { const payload = scoredPhotos.map(({ src, ...photo }) => ({ ...photo, selectedDimensions, dimensionScores: Object.fromEntries(selectedDimensions.map((id) => [id, Number(dimensionScore(photo, id).toFixed(1))])), image: src.startsWith('data:') ? '[local-image]' : src })); const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = 'lumisort-photo-assets.json'; link.click(); URL.revokeObjectURL(url); setNotice('结构化照片资产已导出'); window.setTimeout(() => setNotice(''), 3000); }
+  function exportJson() { const payload = scoredPhotos.map((photo) => { const { src, ...metadata } = photo; return { ...metadata, selectedDimensions, dimensionScores: Object.fromEntries(selectedDimensions.map((id) => [id, Number(dimensionScore(photo, id).toFixed(1))])), image: src.startsWith('data:') ? '[local-image]' : src }; }); const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = 'lumisort-photo-assets.json'; link.click(); URL.revokeObjectURL(url); setNotice('结构化照片资产已导出'); window.setTimeout(() => setNotice(''), 3000); }
 
   return <main className="min-h-screen bg-[#0c0d0d] text-[#f3f0e8]">
     <input ref={inputRef} className="hidden" type="file" accept="image/*" multiple onChange={(event) => event.target.files && addFiles(event.target.files)} />
     <header className="sticky top-0 z-30 flex h-[68px] items-center justify-between border-b border-white/8 bg-[#0c0d0d]/92 px-4 backdrop-blur-xl md:px-7">
       <div className="flex items-center gap-3"><div className="grid size-9 place-items-center rounded-full bg-[#d7ff61] text-[#111]"><Aperture className="size-5" /></div><div><div className="text-[15px] font-semibold tracking-tight">LumiSort <span className="font-normal text-white/30">/ 旅光</span></div><div className="text-[9px] tracking-[0.2em] text-white/36">AI PHOTO CURATOR</div></div></div>
-      <div className="flex items-center gap-2"><div className="mr-1 hidden items-center gap-2 rounded-full border border-white/8 px-3 py-1.5 text-[11px] text-white/45 lg:flex"><span className={`size-1.5 rounded-full ${apiConfigured ? 'bg-[#d7ff61] shadow-[0_0_8px_#d7ff61]' : 'bg-[#ffd36a]'}`} />API · {apiConfigured ? 'DeepSeek Vision' : '演示模式'}</div>
+      <div className="flex items-center gap-2"><div className="mr-1 hidden items-center gap-2 rounded-full border border-white/8 px-3 py-1.5 text-[11px] text-white/45 lg:flex"><span className={`size-1.5 rounded-full ${apiConfigured ? 'bg-[#d7ff61] shadow-[0_0_8px_#d7ff61]' : 'bg-[#ffd36a]'}`} />AI · {apiConfigured ? 'DeepSeek Vision' : '演示结果'}</div><div className="mr-1 hidden items-center gap-2 rounded-full border border-white/8 px-3 py-1.5 text-[11px] text-white/45 xl:flex"><span className={`size-1.5 rounded-full ${user?.mode === 'cloud' ? 'bg-[#d7ff61]' : cloudbaseConfigured ? 'bg-[#8bc8ff]' : 'bg-white/25'}`} />数据 · {user?.mode === 'cloud' ? '腾讯云已同步' : cloudbaseConfigured ? '登录后云同步' : '当前会话'}</div>
         <Button aria-label={copy.account} variant="ghost" size="icon" onClick={() => setShowAccount(true)} className="rounded-full text-white/55 hover:bg-white/7 hover:text-white md:hidden"><UserRound /></Button>
         <Button aria-label="演示指南" variant="ghost" size="icon" onClick={() => setShowHelp(true)} className="rounded-full text-white/55 hover:bg-white/7 hover:text-white"><CircleHelp /></Button>
         <Button variant="outline" className="hidden h-9 rounded-full border-white/10 bg-white/[0.025] px-4 text-white/68 hover:bg-white/8 hover:text-white sm:inline-flex" onClick={exportJson}><FileJson />{copy.export}</Button>
@@ -207,9 +304,9 @@ export function PhotoWorkspace() {
 
     <div className="mx-auto grid max-w-[1720px] gap-5 p-3 sm:p-4 md:grid-cols-[220px_minmax(0,1fr)] md:p-5">
       <aside className="hidden min-h-[calc(100vh-108px)] flex-col rounded-[20px] border border-white/8 bg-[#131515] p-3 md:flex">
-        <p className="mb-2 px-3 pt-2 text-[10px] font-medium tracking-[0.18em] text-white/30">{copy.library}</p><nav className="space-y-1">{navItems.map(({ key, icon: Icon }) => { const count = key === 'all' ? scoredPhotos.length + 2140 : key === 'picks' ? scoredPhotos.filter((p) => p.score >= 7.5).length + 34 : key === 'rejects' ? scoredPhotos.filter((p) => p.score < 7.5 && !p.pending).length + 186 : key === 'pending' ? pendingCount : favoriteCount; return <button key={key} onClick={() => setActiveNav(key)} className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[13px] transition ${activeNav === key ? 'bg-[#d7ff61] font-medium text-[#101111]' : 'text-white/55 hover:bg-white/5 hover:text-white'}`}><Icon className="size-4" /><span className="flex-1">{copy.nav[key]}</span><span className="text-[11px] opacity-55">{count}</span></button>; })}</nav>
+        <p className="mb-2 px-3 pt-2 text-[10px] font-medium tracking-[0.18em] text-white/30">{copy.library}</p><nav className="space-y-1">{navItems.map(({ key, icon: Icon }) => { const demoExtra = user?.mode === 'cloud' ? 0 : key === 'all' ? 2140 : key === 'picks' ? 34 : key === 'rejects' ? 186 : 0; const count = (key === 'all' ? scoredPhotos.length : key === 'picks' ? scoredPhotos.filter((p) => p.score >= 7.5).length : key === 'rejects' ? scoredPhotos.filter((p) => p.score < 7.5 && !p.pending).length : key === 'pending' ? pendingCount : favoriteCount) + demoExtra; return <button key={key} onClick={() => setActiveNav(key)} className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[13px] transition ${activeNav === key ? 'bg-[#d7ff61] font-medium text-[#101111]' : 'text-white/55 hover:bg-white/5 hover:text-white'}`}><Icon className="size-4" /><span className="flex-1">{copy.nav[key]}</span><span className="text-[11px] opacity-55">{count}</span></button>; })}</nav>
         <div className="my-5 border-t border-white/7" /><p className="mb-2 px-3 text-[10px] font-medium tracking-[0.18em] text-white/30">智能相册</p>{['可交付人像', '清晰风景', '需人工复核'].map((album, index) => <button key={album} onClick={() => setQuery(index === 1 ? '清晰风景' : index === 2 ? '整体失焦' : '清晰人像')} className="flex items-center gap-2 px-3 py-2 text-left text-[12px] text-white/42 hover:text-white"><FolderOpen className="size-3.5" />{album}</button>)}
-        <div className="mt-auto space-y-3"><div className="rounded-2xl border border-white/8 bg-white/[0.025] p-4"><div className="mb-6 flex items-center justify-between"><Sparkles className="size-5 text-[#d7ff61]" /><span className="text-[10px] text-white/28">THIS MONTH</span></div><p className="text-sm font-medium">2,148 张已结构化</p><p className="mt-1 text-[11px] leading-5 text-white/35">累计节省约 14.6 小时人工筛选时间</p></div><button onClick={() => setShowAccount(true)} className="flex w-full items-center gap-3 rounded-2xl border border-white/8 bg-white/[0.025] p-3 text-left transition hover:border-white/16 hover:bg-white/[0.05]"><span className={`grid size-9 shrink-0 place-items-center rounded-full ${demoUser ? 'bg-[#d7ff61] text-black' : 'bg-white/7 text-white/45'}`}>{demoUser ? demoUser.name.slice(0, 1).toUpperCase() : <UserRound className="size-4" />}</span><span className="min-w-0 flex-1"><strong className="block truncate text-xs font-medium">{demoUser?.name || copy.guest}</strong><span className="mt-0.5 block truncate text-[10px] text-white/32">{demoUser?.email || copy.account}</span></span><Settings2 className="size-3.5 text-white/28" /></button></div>
+        <div className="mt-auto space-y-3"><div className="rounded-2xl border border-white/8 bg-white/[0.025] p-4"><div className="mb-6 flex items-center justify-between"><Sparkles className="size-5 text-[#d7ff61]" /><span className="text-[10px] text-white/28">{user?.mode === 'cloud' ? 'MY CLOUD' : 'DEMO DATA'}</span></div><p className="text-sm font-medium">{user?.mode === 'cloud' ? `${photos.length} 张云端照片` : '2,148 张已结构化'}</p><p className="mt-1 text-[11px] leading-5 text-white/35">{user?.mode === 'cloud' ? '图片、评分和标签均按账号隔离' : '累计节省约 14.6 小时人工筛选时间'}</p></div><button onClick={() => setShowAccount(true)} className="flex w-full items-center gap-3 rounded-2xl border border-white/8 bg-white/[0.025] p-3 text-left transition hover:border-white/16 hover:bg-white/[0.05]"><span className={`grid size-9 shrink-0 place-items-center rounded-full ${user ? 'bg-[#d7ff61] text-black' : 'bg-white/7 text-white/45'}`}>{user ? user.name.slice(0, 1).toUpperCase() : <UserRound className="size-4" />}</span><span className="min-w-0 flex-1"><strong className="block truncate text-xs font-medium">{user?.name || copy.guest}</strong><span className="mt-0.5 block truncate text-[10px] text-white/32">{user?.email || copy.account}</span></span><Settings2 className="size-3.5 text-white/28" /></button></div>
       </aside>
 
       <section className="min-w-0">
@@ -229,8 +326,9 @@ export function PhotoWorkspace() {
     {notice && <div role="status" className="fixed bottom-5 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-full bg-[#efffc4] px-4 py-2.5 text-xs font-medium text-[#101111] shadow-2xl"><Check className="size-4" />{notice}</div>}
     {deleted && <div role="status" className="fixed bottom-5 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 whitespace-nowrap rounded-full border border-white/10 bg-[#efffc4] py-2 pl-4 pr-2 text-xs font-medium text-[#101111] shadow-2xl"><Trash2 className="size-4" />已移除「{deleted.photo.title}」<button onClick={undoDelete} className="flex items-center gap-1 rounded-full bg-black/10 px-3 py-1.5 transition hover:bg-black/15"><RotateCcw className="size-3" />撤销</button></div>}
     {analyzing && <AnalysisOverlay progress={progress} pendingCount={pendingCount} dimensionCount={selectedDimensions.length} />}
+    {cloudLoading && <div className="fixed inset-0 z-40 grid place-items-center bg-black/56 backdrop-blur-sm"><div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-[#151717] px-5 py-4 text-sm text-white/65"><LoaderCircle className="size-4 animate-spin text-[#d7ff61]" />正在加载你的腾讯云照片库</div></div>}
     {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
-    {showAccount && <AccountSettings user={demoUser} language={language} fontScale={fontScale} onLanguage={setLanguage} onFontScale={setFontScale} onClose={() => setShowAccount(false)} onLogin={(user) => { setDemoUser(user); setNotice(`已切换为 ${user.name} 的演示登录状态`); window.setTimeout(() => setNotice(''), 2800); }} onLogout={() => { setDemoUser(null); setNotice('已切换为游客模式'); window.setTimeout(() => setNotice(''), 2800); }} />}
+    {showAccount && <AccountSettings user={user} cloudConfigured={cloudbaseConfigured} language={language} fontScale={fontScale} onLanguage={setLanguage} onFontScale={setFontScale} onClose={() => setShowAccount(false)} onCloudLogin={async (email, password) => enterCloudLibrary(await signInCloud(email, password))} onCloudRegister={async (name, email, password) => { const result = await signUpCloud(name, email, password); if (result.user && !result.verificationRequired) await enterCloudLibrary(result.user); return result.verificationRequired; }} onCloudVerify={async (code) => enterCloudLibrary(await verifyCloudSignUp(code))} onDemoLogin={() => { const demo = { id: 'demo', name: 'Lumi Guest', email: 'guest@lumisort.demo', mode: 'demo' as const }; setUser(demo); setNotice('已进入演示登录状态，数据仅保留在当前页面'); window.setTimeout(() => setNotice(''), 2800); }} onLogout={async () => { if (user?.mode === 'cloud') await signOutCloud().catch(() => undefined); setUser(null); setPhotos(seedPhotos); setActiveNav('picks'); setNotice('已退出账号并返回公开演示库'); window.setTimeout(() => setNotice(''), 2800); }} />}
     {showDimensions && <QualitySettings selected={selectedDimensions} onClose={() => setShowDimensions(false)} onPreset={(dimensions) => setSelectedDimensions(dimensions)} onToggle={(id) => setSelectedDimensions((current) => current.includes(id) ? current.length === 1 ? current : current.filter((item) => item !== id) : [...current, id])} />}
     <PhotoDetail photo={selected} dimensions={selectedDimensions} open={!!selected} onOpenChange={(open) => !open && setSelected(null)} onFavorite={() => selected && toggleFavorite(selected.id)} onDelete={() => selected && deletePhoto(selected.id)} />
   </main>;
@@ -246,10 +344,46 @@ function EmptyState({ onUpload }: { onUpload: () => void }) { return <div classN
 function NoResults({ onReset }: { onReset: () => void }) { return <div className="grid min-h-[300px] place-items-center rounded-[22px] border border-white/8 bg-[#131515] p-8 text-center"><div><Search className="mx-auto size-7 text-white/25" /><h3 className="mt-4 font-medium">这次没找到匹配画面</h3><p className="mt-1 text-xs text-white/35">换一种描述，或降低评分门槛。</p><Button variant="outline" onClick={onReset} className="mt-5 rounded-full border-white/10 bg-transparent text-white hover:bg-white/8">查看全部</Button></div></div>; }
 function AnalysisOverlay({ progress, pendingCount, dimensionCount }: { progress: number; pendingCount: number; dimensionCount: number }) { const stage = progress < 25 ? '正在识别主体与画面类型' : progress < 55 ? '正在检测焦点、抖动与噪点' : progress < 82 ? '正在评估曝光、色彩与场景结构' : '正在按所选维度生成综合分'; return <div className="fixed inset-0 z-40 grid place-items-center bg-black/66 p-5 backdrop-blur-md"><div className="w-full max-w-md rounded-[26px] border border-white/10 bg-[#151717] p-6 shadow-2xl"><div className="flex items-start justify-between"><div className="grid size-11 place-items-center rounded-2xl bg-[#d7ff61]/12"><LoaderCircle className="size-5 animate-spin text-[#d7ff61]" /></div><Badge className="bg-[#d7ff61]/10 text-[#d7ff61] hover:bg-[#d7ff61]/10">VISION MODEL READY</Badge></div><h3 className="mt-8 text-xl font-medium">正在检测 {pendingCount} 张照片</h3><p className="mt-2 text-sm text-white/40">{stage}</p><div className="mt-7 flex items-center justify-between text-xs text-white/45"><span>{dimensionCount} 项自定义质量检测</span><span>{Math.round(progress)}%</span></div><div className="mt-3 h-1 overflow-hidden rounded-full bg-white/8"><div className="h-full bg-[#d7ff61] transition-all" style={{ width: `${progress}%` }} /></div><div className="mt-5 grid grid-cols-4 gap-2 text-center text-[9px] text-white/28">{['清晰度', '光线色彩', '人像专项', '场景结构'].map((item) => <span key={item}>{item}</span>)}</div></div></div>; }
 
-function AccountSettings({ user, language, fontScale, onLanguage, onFontScale, onLogin, onLogout, onClose }: { user: DemoUser | null; language: UiLanguage; fontScale: number; onLanguage: (language: UiLanguage) => void; onFontScale: (scale: number) => void; onLogin: (user: DemoUser) => void; onLogout: () => void; onClose: () => void }) {
-  const [name, setName] = useState(''); const [email, setEmail] = useState(''); const [error, setError] = useState('');
-  function createAccount(event: FormEvent) { event.preventDefault(); if (!name.trim() || !email.includes('@')) { setError('请填写昵称和有效邮箱'); return; } setError(''); onLogin({ name: name.trim(), email: email.trim() }); }
-  return <div role="dialog" aria-modal="true" aria-labelledby="account-title" className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/70 p-4 backdrop-blur-sm" onMouseDown={(event) => event.currentTarget === event.target && onClose()}><div className="my-auto w-full max-w-2xl overflow-hidden rounded-[26px] border border-white/10 bg-[#151717] shadow-2xl"><div className="flex items-start justify-between border-b border-white/8 p-5 sm:p-6"><div><Badge className="bg-[#d7ff61]/10 text-[#d7ff61] hover:bg-[#d7ff61]/10">PROFILE & PREFERENCES</Badge><h2 id="account-title" className="mt-3 text-xl font-medium">个人与通用设置</h2><p className="mt-1 text-xs text-white/38">管理演示登录状态，以及仅保存在当前设备的界面偏好。</p></div><Button aria-label="关闭" variant="ghost" size="icon" onClick={onClose} className="shrink-0 rounded-full text-white/45 hover:bg-white/7 hover:text-white"><X /></Button></div><div className="grid md:grid-cols-[1fr_1.05fr]"><section className="border-b border-white/8 p-5 sm:p-6 md:border-b-0 md:border-r"><div className="mb-4 flex items-center gap-2 text-xs font-medium text-white/55"><UserRound className="size-4 text-[#d7ff61]" />账号状态</div>{user ? <div><div className="flex items-center gap-3 rounded-2xl border border-[#d7ff61]/18 bg-[#d7ff61]/6 p-4"><span className="grid size-11 place-items-center rounded-full bg-[#d7ff61] font-medium text-black">{user.name.slice(0, 1).toUpperCase()}</span><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><strong className="truncate text-sm">{user.name}</strong><Badge className="bg-[#d7ff61]/12 text-[9px] text-[#d7ff61] hover:bg-[#d7ff61]/12">已登录</Badge></div><p className="mt-1 truncate text-[11px] text-white/38">{user.email}</p></div></div><Button variant="outline" onClick={onLogout} className="mt-4 w-full rounded-xl border-white/10 bg-transparent text-white hover:bg-white/7"><LogOut />切换为游客模式</Button></div> : <form onSubmit={createAccount}><div className="rounded-2xl border border-white/8 bg-black/15 p-4"><div className="flex items-center gap-2 text-sm font-medium"><LogIn className="size-4 text-[#d7ff61]" />创建演示账号</div><p className="mt-1 text-[10px] leading-4 text-white/30">不会创建真实云端账户，也不会上传或保存以下信息。</p><label className="mt-4 block text-[10px] text-white/38">昵称<Input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：Alex" className="mt-1.5 h-10 border-white/10 bg-white/[0.025] text-white placeholder:text-white/20" /></label><label className="mt-3 block text-[10px] text-white/38">邮箱<Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@example.com" className="mt-1.5 h-10 border-white/10 bg-white/[0.025] text-white placeholder:text-white/20" /></label>{error && <p className="mt-2 text-[10px] text-[#ff8d82]">{error}</p>}<Button type="submit" className="mt-4 w-full rounded-xl bg-[#d7ff61] text-black hover:bg-[#e1ff8a]"><Mail />创建并登录</Button></div><button type="button" onClick={() => onLogin({ name: 'Lumi Guest', email: 'guest@lumisort.demo' })} className="mt-3 w-full text-center text-[11px] text-white/38 hover:text-white/70">一键切换为演示登录状态</button></form>}</section><section className="p-5 sm:p-6"><div className="flex items-center gap-2 text-xs font-medium text-white/55"><Languages className="size-4 text-[#d7ff61]" />界面语言</div><div className="mt-3 grid grid-cols-3 gap-2">{([['zh-CN', '简体中文'], ['en', 'English'], ['zh-TW', '繁體中文']] as const).map(([value, label]) => <button key={value} onClick={() => onLanguage(value)} className={`rounded-xl border px-2 py-2.5 text-xs transition ${language === value ? 'border-[#d7ff61]/45 bg-[#d7ff61]/10 text-[#d7ff61]' : 'border-white/8 bg-white/[0.025] text-white/42 hover:text-white/70'}`}>{label}</button>)}</div><div className="mt-7 flex items-center justify-between"><div className="flex items-center gap-2 text-xs font-medium text-white/55"><Type className="size-4 text-[#d7ff61]" />字体大小</div><strong className="text-xs text-[#d7ff61]">{fontScale}%</strong></div><Slider min={90} max={115} step={5} value={[fontScale]} onValueChange={(value) => onFontScale(Number(Array.isArray(value) ? value[0] : value))} className="mt-5 [&_[data-slot=slider-range]]:bg-[#d7ff61] [&_[data-slot=slider-track]]:bg-white/10" /><div className="mt-2 flex justify-between text-[9px] text-white/25"><span>紧凑</span><span>标准</span><span>大字</span></div><div className="mt-7 rounded-2xl border border-white/8 bg-black/15 p-4"><div className="flex items-center gap-2 text-xs text-white/55"><ShieldCheck className="size-4 text-[#d7ff61]" />隐私说明</div><p className="mt-2 text-[10px] leading-5 text-white/30">语言与字体偏好保存在当前浏览器。演示账号仅存在于本次页面会话，刷新后恢复游客模式；接入真实账号系统后才支持跨设备同步。</p></div></section></div></div></div>;
+function AccountSettings({ user, cloudConfigured, language, fontScale, onLanguage, onFontScale, onCloudLogin, onCloudRegister, onCloudVerify, onDemoLogin, onLogout, onClose }: {
+  user: AppUser | null; cloudConfigured: boolean; language: UiLanguage; fontScale: number;
+  onLanguage: (language: UiLanguage) => void; onFontScale: (scale: number) => void;
+  onCloudLogin: (email: string, password: string) => Promise<void>;
+  onCloudRegister: (name: string, email: string, password: string) => Promise<boolean>;
+  onCloudVerify: (code: string) => Promise<void>; onDemoLogin: () => void; onLogout: () => Promise<void>; onClose: () => void;
+}) {
+  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [name, setName] = useState(''); const [email, setEmail] = useState(''); const [password, setPassword] = useState('');
+  const [code, setCode] = useState(''); const [awaitingOtp, setAwaitingOtp] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  async function submitAccount(event: FormEvent) {
+    event.preventDefault(); setError('');
+    if (!email.includes('@') || password.length < 8 || (mode === 'register' && !name.trim())) { setError('请填写有效邮箱，密码至少 8 位'); return; }
+    setBusy(true);
+    try {
+      if (mode === 'login') await onCloudLogin(email.trim(), password);
+      else setAwaitingOtp(await onCloudRegister(name.trim(), email.trim(), password));
+    } catch (value) { setError(value instanceof Error ? value.message : '账号请求失败，请稍后重试'); }
+    finally { setBusy(false); }
+  }
+  async function submitOtp(event: FormEvent) {
+    event.preventDefault(); if (!code.trim()) return; setBusy(true); setError('');
+    try { await onCloudVerify(code.trim()); } catch (value) { setError(value instanceof Error ? value.message : '验证码无效'); } finally { setBusy(false); }
+  }
+  return <div role="dialog" aria-modal="true" aria-labelledby="account-title" className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/70 p-4 backdrop-blur-sm" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
+    <div className="my-auto w-full max-w-2xl overflow-hidden rounded-[26px] border border-white/10 bg-[#151717] shadow-2xl">
+      <div className="flex items-start justify-between border-b border-white/8 p-5 sm:p-6"><div><Badge className="bg-[#d7ff61]/10 text-[#d7ff61] hover:bg-[#d7ff61]/10">PROFILE & CLOUD</Badge><h2 id="account-title" className="mt-3 text-xl font-medium">个人与通用设置</h2><p className="mt-1 text-xs text-white/38">腾讯云账号隔离照片库，界面偏好保存在当前设备。</p></div><Button aria-label="关闭" variant="ghost" size="icon" onClick={onClose} className="shrink-0 rounded-full text-white/45 hover:bg-white/7 hover:text-white"><X /></Button></div>
+      <div className="grid md:grid-cols-[1fr_1.05fr]">
+        <section className="border-b border-white/8 p-5 sm:p-6 md:border-b-0 md:border-r">
+          <div className="mb-4 flex items-center justify-between"><span className="flex items-center gap-2 text-xs font-medium text-white/55"><UserRound className="size-4 text-[#d7ff61]" />账号状态</span><Badge className={cloudConfigured ? 'bg-[#d7ff61]/10 text-[#d7ff61]' : 'bg-white/6 text-white/35'}>{cloudConfigured ? '腾讯云就绪' : '演示环境'}</Badge></div>
+          {user ? <div><div className="flex items-center gap-3 rounded-2xl border border-[#d7ff61]/18 bg-[#d7ff61]/6 p-4"><span className="grid size-11 place-items-center rounded-full bg-[#d7ff61] font-medium text-black">{user.name.slice(0, 1).toUpperCase()}</span><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><strong className="truncate text-sm">{user.name}</strong><Badge className="bg-[#d7ff61]/12 text-[9px] text-[#d7ff61]">{user.mode === 'cloud' ? '云端账号' : '演示账号'}</Badge></div><p className="mt-1 truncate text-[11px] text-white/38">{user.email}</p></div></div><Button variant="outline" disabled={busy} onClick={() => { setBusy(true); onLogout().finally(() => setBusy(false)); }} className="mt-4 w-full rounded-xl border-white/10 bg-transparent text-white hover:bg-white/7"><LogOut />退出并返回演示库</Button></div> : cloudConfigured ? <div>
+            <div className="mb-3 grid grid-cols-2 rounded-xl bg-black/20 p-1">{(['login', 'register'] as const).map((value) => <button key={value} onClick={() => { setMode(value); setError(''); setAwaitingOtp(false); }} className={`rounded-lg py-2 text-xs ${mode === value ? 'bg-white/9 text-white' : 'text-white/35'}`}>{value === 'login' ? '登录' : '创建账号'}</button>)}</div>
+            {awaitingOtp ? <form onSubmit={submitOtp} className="rounded-2xl border border-white/8 bg-black/15 p-4"><p className="text-sm font-medium">验证邮箱</p><p className="mt-1 text-[10px] leading-4 text-white/35">验证码已发送到 {email}，完成后即可创建独立照片库。</p><Input value={code} onChange={(event) => setCode(event.target.value)} inputMode="numeric" placeholder="输入邮箱验证码" className="mt-4 h-10 border-white/10 bg-white/[0.025] text-white" /><Button disabled={busy} className="mt-3 w-full rounded-xl bg-[#d7ff61] text-black"><Mail />{busy ? '验证中…' : '完成验证'}</Button></form> : <form onSubmit={submitAccount} className="rounded-2xl border border-white/8 bg-black/15 p-4"><div className="flex items-center gap-2 text-sm font-medium"><LogIn className="size-4 text-[#d7ff61]" />{mode === 'login' ? '登录腾讯云账号' : '创建腾讯云账号'}</div>{mode === 'register' && <label className="mt-4 block text-[10px] text-white/38">昵称<Input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：Alex" className="mt-1.5 h-10 border-white/10 bg-white/[0.025] text-white" /></label>}<label className="mt-3 block text-[10px] text-white/38">邮箱<Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@example.com" className="mt-1.5 h-10 border-white/10 bg-white/[0.025] text-white" /></label><label className="mt-3 block text-[10px] text-white/38">密码<Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 8 位" className="mt-1.5 h-10 border-white/10 bg-white/[0.025] text-white" /></label>{error && <p className="mt-2 text-[10px] text-[#ff8d82]">{error}</p>}<Button disabled={busy} className="mt-4 w-full rounded-xl bg-[#d7ff61] text-black"><Mail />{busy ? '处理中…' : mode === 'login' ? '登录并加载照片库' : '创建账号'}</Button></form>}
+            <div className="mt-3 grid grid-cols-3 gap-2">{['微信', 'QQ', '抖音'].map((provider) => <button key={provider} disabled title="需在开放平台与腾讯云控制台开通" className="rounded-lg border border-white/8 py-2 text-[10px] text-white/25">{provider}</button>)}</div>
+          </div> : <div className="rounded-2xl border border-white/8 bg-black/15 p-4"><p className="text-sm font-medium">腾讯云正式版接口已预留</p><p className="mt-2 text-[10px] leading-5 text-white/35">配置 CloudBase 环境 ID 与 Web 访问密钥后，邮箱注册、登录和个人云端照片库会自动启用。</p><Button onClick={onDemoLogin} className="mt-4 w-full rounded-xl bg-[#d7ff61] text-black">进入演示账号</Button></div>}
+        </section>
+        <section className="p-5 sm:p-6"><div className="flex items-center gap-2 text-xs font-medium text-white/55"><Languages className="size-4 text-[#d7ff61]" />界面语言</div><div className="mt-3 grid grid-cols-3 gap-2">{([['zh-CN', '简体中文'], ['en', 'English'], ['zh-TW', '繁體中文']] as const).map(([value, label]) => <button key={value} onClick={() => onLanguage(value)} className={`rounded-xl border px-2 py-2.5 text-xs transition ${language === value ? 'border-[#d7ff61]/45 bg-[#d7ff61]/10 text-[#d7ff61]' : 'border-white/8 bg-white/[0.025] text-white/42 hover:text-white/70'}`}>{label}</button>)}</div><div className="mt-7 flex items-center justify-between"><div className="flex items-center gap-2 text-xs font-medium text-white/55"><Type className="size-4 text-[#d7ff61]" />字体大小</div><strong className="text-xs text-[#d7ff61]">{fontScale}%</strong></div><Slider min={90} max={115} step={5} value={[fontScale]} onValueChange={(value) => onFontScale(Number(Array.isArray(value) ? value[0] : value))} className="mt-5 [&_[data-slot=slider-range]]:bg-[#d7ff61] [&_[data-slot=slider-track]]:bg-white/10" /><div className="mt-2 flex justify-between text-[9px] text-white/25"><span>紧凑</span><span>标准</span><span>大字</span></div><div className="mt-7 rounded-2xl border border-white/8 bg-black/15 p-4"><div className="flex items-center gap-2 text-xs text-white/55"><ShieldCheck className="size-4 text-[#d7ff61]" />隐私与存储</div><p className="mt-2 text-[10px] leading-5 text-white/30">云端账号的图片保存在腾讯云存储，评分与标签保存在数据库，并按账号 UID 隔离。游客和演示账号的数据仍只存在于当前页面。</p></div></section>
+      </div>
+    </div>
+  </div>;
 }
 
 function QualitySettings({ selected, onToggle, onPreset, onClose }: { selected: DimensionId[]; onToggle: (id: DimensionId) => void; onPreset: (ids: DimensionId[]) => void; onClose: () => void }) {

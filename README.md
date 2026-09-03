@@ -18,7 +18,9 @@ An interactive AI photo-culling demo for portraits and landscapes, with a config
 - Search with natural-language descriptions and combine them with score filters.
 - Review photo details, favorites, EXIF-style metadata and dominant colors.
 - Remove unwanted photos from the library with a six-second undo action.
-- Switch between guest and demo-account states from the profile panel.
+- Sign up and sign in with email through Tencent CloudBase when a production environment is configured.
+- Store each account's original photos in CloudBase Storage and its AI results in a user-isolated database collection.
+- Fall back to a clearly labeled browser-session demo when CloudBase is not configured.
 - Persist device-local language and global font-size preferences.
 - Export the structured photo-asset library as JSON.
 - Run immediately in portfolio demo mode, without an API key.
@@ -48,6 +50,7 @@ Structured JSON asset export
 - Lucide icons
 - Cloudflare Workers-compatible server route
 - OpenAI-compatible multimodal API contract
+- Tencent CloudBase Web SDK for authentication, database and image storage
 
 ## Run locally
 
@@ -76,6 +79,18 @@ DEEPSEEK_VISION_MODEL=deepseek-v4-flash-vision-exp
 
 The API key is read only by the server route and is never included in browser code. Because provider model names and multimodal support can change, use the vision-capable model identifier offered by your provider.
 
+## Enable real accounts and cloud storage
+
+Create a Tencent CloudBase environment, then add the public Web application configuration:
+
+```env
+NEXT_PUBLIC_TCB_ENV_ID=your_cloudbase_environment_id
+NEXT_PUBLIC_TCB_REGION=ap-shanghai
+NEXT_PUBLIC_TCB_PUBLISHABLE_KEY=your_web_publishable_key
+```
+
+The app will then enable email registration, persistent login, per-user photo uploads, metadata synchronization, favorite updates and delayed cloud deletion with undo. See [the CloudBase production checklist](./cloudbase/README.md) for collection rules, domain configuration, third-party login requirements and launch checks.
+
 ## API response shape
 
 ```json
@@ -98,9 +113,9 @@ The server evaluates only the dimensions chosen by the user and calculates their
 
 ## Privacy
 
-- Imported images remain in memory in the current browser session in demo mode and disappear after refresh.
-- The current demo does not have user accounts, D1 metadata persistence or R2 image storage.
-- The profile panel intentionally simulates account creation and sign-in; it never stores submitted demo credentials on a server.
+- Imported images remain in memory and disappear after refresh when the app is running in demo mode.
+- When CloudBase is configured and a user signs in, original files are stored in that user's cloud path and metadata is protected by UID-based database rules.
+- The interface never claims that a demo account is a real cloud account.
 - No API key is committed to the repository.
 - Configure production secrets through the hosting platform rather than source files.
 

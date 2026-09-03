@@ -30,13 +30,14 @@ function normalize(raw: unknown, dimensions: DimensionId[]): VisionAnalysis {
 }
 
 export async function POST(request: Request) {
-  const body = await request.json().catch(() => ({})) as { imageDataUrl?: string; dimensions?: string[] };
+  const body = await request.json().catch(() => ({})) as { imageDataUrl?: string; imageUrl?: string; dimensions?: string[] };
   const dimensions = normalizeDimensions(body.dimensions); const fallback = demoAnalysis(dimensions);
+  const imageUrl = body.imageUrl || body.imageDataUrl;
   const apiKey = process.env.DEEPSEEK_API_KEY; const baseUrl = process.env.DEEPSEEK_VISION_BASE_URL || 'https://api.deepseek.com/chat/completions'; const model = process.env.DEEPSEEK_VISION_MODEL || 'deepseek-v4-flash-vision-exp';
-  if (!apiKey || !body.imageDataUrl) { await new Promise((resolve) => setTimeout(resolve, 650)); return Response.json({ mode: 'demo', analysis: fallback }); }
+  if (!apiKey || !imageUrl) { await new Promise((resolve) => setTimeout(resolve, 650)); return Response.json({ mode: 'demo', analysis: fallback }); }
   const requested = dimensions.map((id) => `${id}（${dimensionLabels[id]}）`).join('、');
   const prompt = `你是专业摄影工作室的智能筛片助手，需要同时适用于人像、风景、街拍和旅行照片。只评估用户指定的质量维度：${requested}。只返回 JSON：{"metrics":{"维度id":0-10},"composition":0-10,"color":0-10,"clarity":0-10,"exposure":0-10,"faceQuality":0-10,"issues":["明确可观察问题"],"tags":["6个中文语义标签"],"entities":["8个中文可视实体"],"mood":"2-4字中文氛围","summary":"一句可解释筛片建议"}。metrics 必须仅包含上述维度 id，每项独立评分。重点识别人脸或风景主体虚焦、整体失焦、相机抖动、运动拖影、噪点、过曝、欠曝、高光溢出、暗部丢失、白平衡偏色、地平线倾斜、闭眼、遮挡与不当裁切。没有人脸时，人像专项指标应按主体可用性解释，不得因无人脸直接判低分。issues 没有问题时返回空数组。最终综合分由服务端按用户所选维度等权计算。`;
-  try { const response = await fetch(baseUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model, temperature: 0.15, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: prompt }, { role: 'user', content: [{ type: 'text', text: '请按指定维度分析这张照片。' }, { type: 'image_url', image_url: { url: body.imageDataUrl } }] }] }) }); if (!response.ok) throw new Error(`Vision API ${response.status}`); const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> }; const content = result.choices?.[0]?.message?.content || '{}'; return Response.json({ mode: 'live', dimensions, analysis: normalize(JSON.parse(content), dimensions) }); } catch (error) { return Response.json({ mode: 'fallback', dimensions, analysis: fallback, warning: error instanceof Error ? error.message : 'Vision API unavailable' }); }
+  try { const response = await fetch(baseUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model, temperature: 0.15, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: prompt }, { role: 'user', content: [{ type: 'text', text: '请按指定维度分析这张照片。' }, { type: 'image_url', image_url: { url: imageUrl } }] }] }) }); if (!response.ok) throw new Error(`Vision API ${response.status}`); const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> }; const content = result.choices?.[0]?.message?.content || '{}'; return Response.json({ mode: 'live', dimensions, analysis: normalize(JSON.parse(content), dimensions) }); } catch (error) { return Response.json({ mode: 'fallback', dimensions, analysis: fallback, warning: error instanceof Error ? error.message : 'Vision API unavailable' }); }
 }
 
 export async function GET() {
